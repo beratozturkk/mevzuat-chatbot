@@ -1,0 +1,22 @@
+# Virtual Environment
+.venv/
+venv/
+
+# Vector Database
+mevzuat_db/
+
+# Raw PDF & Documents
+Mevzuat/
+
+# Large generated JSON files
+tum_mevzuat_maddeleri.json
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Environment variables
+.env
+
+# OS
+.DS_Store

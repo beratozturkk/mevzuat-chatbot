@@ -1,33 +1,41 @@
+# scripts/build_chromadb.py (BERTurk ile)
 import json
 import os
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from tqdm import tqdm
 
+JSON_PATH = "../tum_mevzuat_maddeleri_old.json"
+CHROMA_DIR = "../mevzuat_db"
 
-
-JSON_PATH = "/Users/beratozturk/Desktop/mevzuat_chatbot/tum_mevzuat_maddeleri.json"   # batch_extractor çıktısı
-CHROMA_DIR = "../mevzuat_db"                  # veritabanı klasörü
-
-
-# Küçük ama etkili bir model -> Türkçe ve İngilizce için iyi
-embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-
+# BERTurk - Türkçe için optimize edilmiş! 🇹🇷
+print("🤖 BERTurk embedding modeli yükleniyor...")
+embeddings = HuggingFaceEmbeddings(
+    model_name="dbmdz/bert-base-turkish-cased",  # TÜRKÇE BERT!
+    model_kwargs={'device': 'cpu'},
+    encode_kwargs={'normalize_embeddings': True}
+)
+print("✅ BERTurk hazır!")
 
 if not os.path.exists(JSON_PATH):
     print(f"❌ JSON dosyası bulunamadı: {JSON_PATH}")
-    print("Lütfen önce batch_extractor.py dosyasını çalıştır.")
     exit()
 
 with open(JSON_PATH, "r", encoding="utf-8") as f:
     data = json.load(f)
 
 texts = [d["icerik"] for d in data]
-metadata = [{"belge": d["belge"], "madde_no": d["madde_no"]} for d in data]
+metadata = [
+    {
+        "belge": d["belge"],
+        "madde_no": d["madde_no"],
+        "fikra_no": d.get("fikra_no")
+    }
+    for d in data
+]
 
-print(f"📚 Toplam {len(texts)} madde yüklendi.")
-print("🔢 Embedding’ler oluşturuluyor...")
-
+print(f"📚 Toplam {len(texts)} chunk yüklendi.")
+print("🔢 BERTurk embedding'ler oluşturuluyor (biraz uzun sürebilir)...")
 
 db = Chroma.from_texts(
     texts=texts,
@@ -37,4 +45,4 @@ db = Chroma.from_texts(
 )
 
 db.persist()
-print(f"✅ ChromaDB başarıyla oluşturuldu: {CHROMA_DIR}")
+print(f"✅ ChromaDB (BERTurk ile) başarıyla oluşturuldu: {CHROMA_DIR}")

@@ -1,11 +1,11 @@
 langchain
+langchain-community
 chromadb
 sentence-transformers
 pymupdf
 fastapi
 uvicorn
-openai
-tqdm
 streamlit
 requests
 pydantic
+tqdm

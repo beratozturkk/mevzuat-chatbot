@@ -9,7 +9,7 @@ mevzuat_db/
 Mevzuat/
 
 # Large generated JSON files
-tum_mevzuat_maddeleri.json
+tum_mevzuat_maddeleri_old.json
 
 # Python cache
 __pycache__/

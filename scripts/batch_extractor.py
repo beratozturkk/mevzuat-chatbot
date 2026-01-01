@@ -1,117 +1,167 @@
-# chatbot_api.py (TAM YENİ VERSİYON - LLM + Memory)
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
-from langchain.memory import ConversationBufferMemory
-from langchain.chains import ConversationalRetrievalChain
-from langchain_openai import ChatOpenAI
+# batch_extractor.py (TAM İÇERİK OKUMA - FIXED)
 import os
+import re
+import json
+from tqdm import tqdm
 
-app = FastAPI(title="Mevzuat Chatbot API")
+# PDF okuyucu seç
+USE_PDFPLUMBER = False
+pdfplumber = None
+PdfReader = None
 
-# ChromaDB
-CHROMA_DIR = "./mevzuat_db"
-embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+try:
+    import pdfplumber
 
-if not os.path.exists(CHROMA_DIR):
-    raise Exception("❌ ChromaDB bulunamadı!")
+    USE_PDFPLUMBER = True
+    print("✅ pdfplumber kullanılıyor")
+except ImportError:
+    try:
+        from PyPDF2 import PdfReader
 
-db = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
-
-# LLM (OpenAI - API key gerekli)
-# Alternatif: Anthropic Claude, Google Gemini, Ollama (local)
-llm = ChatOpenAI(
-    model="gpt-3.5-turbo",
-    temperature=0,  # Deterministik cevaplar
-    openai_api_key=os.getenv("OPENAI_API_KEY")  # Ortam değişkeninden al
-)
-
-# Session bazlı memory storage
-chat_sessions = {}
-
-
-class Question(BaseModel):
-    question: str
-    session_id: str = "default"  # Her kullanıcı için farklı session
-    top_k: int = 3
+        print("⚠️ PyPDF2 kullanılıyor (pdfplumber önerilir)")
+    except ImportError:
+        print("❌ Ne pdfplumber ne de PyPDF2 yüklü!")
+        print("Lütfen çalıştırın: pip install pdfplumber")
+        exit(1)
 
 
-class ChatResponse(BaseModel):
-    question: str
-    answer: str
-    sources: list
-    session_id: str
+def pdf_to_text(pdf_path):
+    """PDF'ten text çıkar"""
+    try:
+        if USE_PDFPLUMBER and pdfplumber:
+            text = ""
+            with pdfplumber.open(pdf_path) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+            return text
+        elif PdfReader:
+            reader = PdfReader(pdf_path)
+            text = ""
+            for page in reader.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+            return text
+        else:
+            return ""
+    except Exception as e:
+        print(f"❌ Hata ({os.path.basename(pdf_path)}): {e}")
+        return ""
 
 
-def get_or_create_memory(session_id: str):
-    """Session için memory oluştur veya getir"""
-    if session_id not in chat_sessions:
-        chat_sessions[session_id] = ConversationBufferMemory(
-            memory_key="chat_history",
-            return_messages=True,
-            output_key="answer"
-        )
-    return chat_sessions[session_id]
+def split_into_maddeler(text, belge_adi):
+    """Metni maddelere ayır"""
+    madde_pattern = r'(?:^|\n)\s*MADDE\s*[-–:.]?\s*(\d+)\s*[-–:.]?'
+    matches = list(re.finditer(madde_pattern, text, re.IGNORECASE | re.MULTILINE))
+
+    if not matches:
+        print(f"   ⚠️ Madde yok, tüm içerik tek parça")
+        return [{
+            "belge": belge_adi,
+            "madde_no": "0",
+            "fikra_no": None,
+            "icerik": text.strip()
+        }]
+
+    chunks = []
+
+    for i, match in enumerate(matches):
+        madde_no = match.group(1)
+        start_pos = match.start()
+
+        if i + 1 < len(matches):
+            end_pos = matches[i + 1].start()
+        else:
+            end_pos = len(text)
+
+        madde_full = text[start_pos:end_pos].strip()
+
+        if madde_full:
+            chunks.append({
+                "belge": belge_adi,
+                "madde_no": madde_no,
+                "fikra_no": None,
+                "icerik": madde_full
+            })
+
+    return chunks
 
 
-@app.get("/")
-def read_root():
-    return {"message": "Mevzuat Chatbot API Çalışıyor! ✅"}
+def clean_belge_name(filename):
+    """Dosya adını temizle"""
+    name = filename.replace(".pdf", "")
+    name = name.replace("_", " ")
+    name = re.sub(r'\d{15,}', '', name)
+    name = re.sub(r'\s+', ' ', name).strip()
+    return name
 
 
-@app.post("/chat", response_model=ChatResponse)
-def chat(q: Question):
-    """Konuşmalı soru-cevap"""
+def process_all_pdfs(pdf_folder):
+    """Tüm PDF'leri işle"""
+    all_data = []
 
-    if not q.question.strip():
-        raise HTTPException(status_code=400, detail="Soru boş olamaz!")
+    if not os.path.exists(pdf_folder):
+        print(f"❌ Klasör bulunamadı: {pdf_folder}")
+        return []
 
-    # Memory'yi al
-    memory = get_or_create_memory(q.session_id)
+    pdf_files = [f for f in os.listdir(pdf_folder) if f.lower().endswith(".pdf")]
 
-    # RAG Chain oluştur
-    qa_chain = ConversationalRetrievalChain.from_llm(
-        llm=llm,
-        retriever=db.as_retriever(search_kwargs={"k": q.top_k}),
-        memory=memory,
-        return_source_documents=True,
-        verbose=True
-    )
+    if not pdf_files:
+        print("⚠️ PDF bulunamadı")
+        return []
 
-    # Soruyu sor
-    result = qa_chain({"question": q.question})
+    print(f"📚 {len(pdf_files)} PDF bulundu\n")
 
-    # Kaynakları formatla
-    sources = []
-    for doc in result["source_documents"]:
-        fikra_text = f", Fıkra {doc.metadata.get('fikra_no')}" if doc.metadata.get('fikra_no') else ""
-        sources.append({
-            "belge": doc.metadata.get("belge", "Bilinmiyor"),
-            "madde_no": doc.metadata.get("madde_no", "?"),
-            "fikra_no": doc.metadata.get("fikra_no"),
-            "kaynak_metni": f"{doc.metadata.get('belge')} - Madde {doc.metadata.get('madde_no')}{fikra_text}",
-            "icerik": doc.page_content[:300] + "..."  # İlk 300 karakter
-        })
+    success = 0
+    failed = 0
 
-    return ChatResponse(
-        question=q.question,
-        answer=result["answer"],
-        sources=sources,
-        session_id=q.session_id
-    )
+    for filename in tqdm(pdf_files, desc="PDF'ler işleniyor"):
+        path = os.path.join(pdf_folder, filename)
+        text = pdf_to_text(path)
 
+        if not text or len(text.strip()) < 50:
+            print(f"❌ Boş: {filename}")
+            failed += 1
+            continue
 
-@app.delete("/session/{session_id}")
-def clear_session(session_id: str):
-    """Session'ı temizle (yeni konuşma başlat)"""
-    if session_id in chat_sessions:
-        del chat_sessions[session_id]
-        return {"message": f"Session '{session_id}' temizlendi"}
-    return {"message": "Session bulunamadı"}
+        belge_adi = clean_belge_name(filename)
+        chunks = split_into_maddeler(text, belge_adi)
+
+        if chunks:
+            all_data.extend(chunks)
+            success += 1
+            first_len = len(chunks[0]['icerik'])
+            print(f"✅ {belge_adi[:50]}... → {len(chunks)} madde (ilk: {first_len} kar)")
+        else:
+            failed += 1
+
+    print(f"\n✅ Başarılı: {success}, ❌ Başarısız: {failed}")
+    print(f"📊 Toplam madde: {len(all_data)}")
+
+    return all_data
 
 
 if __name__ == "__main__":
-    import uvicorn
+    PDF_FOLDER = "../Mevzuat"
+    OUTPUT_FILE = "../tum_mevzuat_maddeleri.json"
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print("🚀 PDF İşleme Başlıyor...\n")
+
+    all_chunks = process_all_pdfs(PDF_FOLDER)
+
+    if all_chunks:
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            json.dump(all_chunks, f, ensure_ascii=False, indent=2)
+
+        print(f"\n✅ Kaydedildi: {OUTPUT_FILE}")
+
+        unique = len(set([c['belge'] for c in all_chunks]))
+        print(f"📋 Benzersiz belge: {unique}")
+
+        lengths = [len(c['icerik']) for c in all_chunks]
+        print(f"📏 Ort. madde: {sum(lengths) // len(lengths)} kar")
+        print(f"📏 En uzun: {max(lengths)} kar")
+    else:
+        print("❌ Hiç veri yok!")

@@ -1,5 +1,3 @@
-# chatbot_api.py - FİX: Gemini Model + Gelişmiş Retrieval
-
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -11,8 +9,8 @@ import json
 from rank_bm25 import BM25Okapi
 from google import genai
 from dotenv import load_dotenv
-load_dotenv()
 
+load_dotenv()
 
 # ============================================================================
 # KONFIGÜRASYON
@@ -21,7 +19,7 @@ load_dotenv()
 app = FastAPI(title="Mevzuat Chatbot API")
 
 CHROMA_DIR = "./mevzuat_db"
-JSON_PATH = "tum_mevzuat_maddeleri.json"
+JSON_PATH = "tum_mevzuat_maddeleri_enriched.json"  # 🆕 ENRICHED kullan!
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
@@ -59,7 +57,6 @@ print("✅ BM25 hazır!")
 
 print("🧠 Gemini LLM yapılandırılıyor...")
 try:
-    # Yeni SDK
     client = genai.Client(api_key=GEMINI_API_KEY)
     MODEL_NAME = 'gemini-2.5-flash'
     print("✅ Gemini LLM hazır!")
@@ -79,11 +76,13 @@ class Question(BaseModel):
     top_k: int = 5
     temperature: float = 0.3
 
+
 class ChatResponse(BaseModel):
     question: str
     answer: str
     sources: list
     session_id: str
+
 
 # ============================================================================
 # YARDIMCI FONKSİYONLAR
@@ -96,11 +95,11 @@ def normalize_text(text: str) -> str:
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
+
 def extract_keywords(query: str) -> List[str]:
     """
     Sorudan önemli anahtar kelimeleri çıkar (stop words'leri filtrele)
     """
-    # Türkçe stop words
     stop_words = {
         'bir', 'bu', 've', 'ile', 'için', 'mi', 'mı', 'mu', 'mü',
         'da', 'de', 'ta', 'te', 'ben', 'sen', 'bana', 'sana',
@@ -116,22 +115,47 @@ def extract_keywords(query: str) -> List[str]:
 
     return keywords
 
+
 def hybrid_search(query: str, top_k: int = 5) -> List[Dict]:
     """
-    Geliştirilmiş Hybrid Search (BM25 + Semantic + Keyword Filtering)
+    Geliştirilmiş Hybrid Search (BM25 + Semantic + Keyword + Metadata)
     """
+    # 🆕 QUERY PREPROCESSING - Bitişik kelimeleri ayır
     query_normalized = normalize_text(query)
 
-    # Anahtar kelimeleri çıkar
-    keywords = extract_keywords(query)
+    # "yandal" → "yan dal" çevirisi
+    if 'yandal' in query_normalized:
+        query_normalized = query_normalized.replace('yandal', 'yan dal')
+        print(f"🔄 Query normalize edildi: 'yandal' → 'yan dal'")
+
+    # "çiftanadal" / "çiftanaadal" → "çift anadal"
+    if 'çiftanadal' in query_normalized or 'çiftanaadal' in query_normalized:
+        query_normalized = query_normalized.replace('çiftanadal', 'çift anadal')
+        query_normalized = query_normalized.replace('çiftanaadal', 'çift anadal')
+        print(f"🔄 Query normalize edildi: 'çift anadal'")
+
+    # 🆕 QUERY EXPANSION - Kısaltmaları genişlet
+    query_expansions = {
+        'cap': 'çift anadal çap',
+        'çap': 'çift anadal çap',
+        'gano': 'genel ağırlıklı not ortalaması',
+    }
+
+    for short, expanded in query_expansions.items():
+        if short in query_normalized:
+            query_normalized = query_normalized.replace(short, expanded)
+            print(f"🔄 Query genişletildi: '{short}' → '{expanded}'")
+
+    # Anahtar kelimeleri çıkar (normalize edilmiş query'den)
+    keywords = extract_keywords(query_normalized)
     print(f"🔍 Anahtar kelimeler: {keywords}")
 
-    # 1. BM25 Search (sadece keywords ile)
+    # 1. BM25 Search (normalized keywords ile)
     bm25_scores = bm25.get_scores(keywords)
 
-    # 2. Semantic Search
+    # 2. Semantic Search (normalized query ile)
     try:
-        semantic_results = db.similarity_search_with_score(query, k=top_k * 3)
+        semantic_results = db.similarity_search_with_score(query_normalized, k=top_k * 3)
     except Exception as e:
         print(f"⚠️  Semantic search hatası: {e}")
         semantic_results = []
@@ -169,17 +193,22 @@ def hybrid_search(query: str, top_k: int = 5) -> List[Dict]:
                     }
                 break
 
-    # 4. AKILLI KEYWORD BOOST (İyileştirilmiş)
+    # 4. AKILLI KEYWORD BOOST
     domain_keywords = {
         'güz': ['güz', 'bahar', 'dönem', 'yarıyıl', 'akademik takvim'],
         'bahar': ['güz', 'bahar', 'dönem', 'yarıyıl', 'akademik takvim'],
         'başvuru': ['başvuru', 'müracaat', 'kayıt', 'kabul', 'şart', 'koşul'],
-        'yatay': ['yatay geçiş', 'dikey geçiş', 'transfer', 'intibak'],
-        'çift': ['çift anadal', 'çap', 'yan dal', 'yandal'],
-        'yan': ['yan dal', 'yandal', 'çift anadal'],
+        'yatay': ['yatay geçiş', 'transfer'],
+        'dikey': ['dikey geçiş'],
+        'çift': ['çift anadal', 'çap', 'ana dal'],
+        'yan': ['yan dal', 'yandal'],
+        'yandal': ['yan dal', 'yandal'],
+        'dal': ['yan dal', 'yandal', 'ana dal'],
+        'anadal': ['çift anadal', 'ana dal', 'çap'],
         'staj': ['staj', 'uygulama', 'iş yeri', 'işletme'],
         'sınav': ['sınav', 'final', 'vize', 'bütünleme', 'mazeret'],
         'dersi': ['ders', 'kurs', 'program', 'müfredat'],
+        'sss': ['sıkça sorulan', 'soru', 'cevap'],  # 🆕 SSS için
     }
 
     for doc_id, result in candidates.items():
@@ -191,48 +220,115 @@ def hybrid_search(query: str, top_k: int = 5) -> List[Dict]:
 
         # Her keyword için kontrol
         for kw in keywords:
-            # Doğrudan eşleşme
+            # Doğrudan eşleşme (içerikte)
             if kw in content_lower:
                 match_count += 1
                 keyword_boost += 2.0
 
-            # Belge adında eşleşme (daha değerli)
+            # BELGE ADINDA EŞLEŞME (ÇOK DEĞERLİ!)
             if kw in belge_lower:
-                keyword_boost += 3.0
-                match_count += 1
+                keyword_boost += 10.0
+                match_count += 2
+                print(f"    🎯 BELGE ADI EŞLEŞMESİ: '{kw}' → '{result['doc']['belge'][:60]}'")
 
             # Domain keyword grubu eşleşmesi
             if kw in domain_keywords:
                 related_words = domain_keywords[kw]
                 for rel_word in related_words:
-                    if rel_word in content_lower or rel_word in belge_lower:
+                    if rel_word in content_lower:
                         keyword_boost += 1.5
                         match_count += 0.5
+                        break
+                    if rel_word in belge_lower:
+                        keyword_boost += 3.0
+                        match_count += 1.0
                         break
 
         # Eşleşme oranı
         if keywords:
             match_ratio = match_count / len(keywords)
-            keyword_boost *= match_ratio  # Düşük eşleşmeleri cezalandır
+            keyword_boost *= match_ratio
 
         result['keyword_boost'] = keyword_boost
         result['match_count'] = match_count
 
-    # 5. Final Skor (Hybrid + Match Filtering)
+    # 5. METADATA-BASED PRIORITY BOOST
+    print("\n🏷️  Metadata boost uygulanıyor...")
+    query_lower = query.lower()
+
+    for doc_id, result in candidates.items():
+        doc = result['doc']
+        belge_lower = doc['belge'].lower()
+
+        # 🆕 Metadata bilgilerini al (enriched JSON'dan)
+        belge_tipi = doc.get('belge_tipi', 'other')
+        oncelik = doc.get('oncelik', 5)
+        fakulte = doc.get('fakulte')
+
+        # Kullanıcı fakülte belirtmiş mi?
+        fakulte_in_query = False
+        if fakulte:
+            fakulte_lower = fakulte.lower()
+            fakulte_in_query = fakulte_lower in query_lower
+
+        # ÜNİVERSİTE GENEL → Büyük boost (fakülte belirtilmediyse)
+        if belge_tipi == 'university_general':
+            if not fakulte_in_query:
+                result['keyword_boost'] += 8.0
+                print(f"  ✨ Genel yönetmelik boost: {doc['belge'][:50]}...")
+
+        # FAKÜLTE SPESİFİK → Eşleşme varsa boost, yoksa CEZA
+        elif belge_tipi == 'faculty_specific':
+            if fakulte_in_query:
+                result['keyword_boost'] += 6.0
+                print(f"  ✅ Fakülte eşleşti: {doc['belge'][:50]}...")
+            else:
+                result['keyword_boost'] -= 4.0
+                print(f"  ⚠️  Fakülte eşleşmedi (ceza): {doc['belge'][:50]}...")
+
+        # PROGRAM SPESİFİK → Normal boost
+        elif belge_tipi == 'program_specific':
+            result['keyword_boost'] += oncelik * 0.5
+
+        # DÜŞÜK ÖNCELİK → Ceza
+        elif belge_tipi == 'low_priority':
+            result['keyword_boost'] -= 2.0
+
+        # 🆕 Öncelik skorunu sakla (normalizasyon için)
+        result['priority_raw'] = oncelik
+
+    # 6. 🆕 Final Skor (Metadata Öncelik Dahil!)
+    print("\n🎯 Final skor hesaplanıyor...")
     for doc_id in candidates:
         c = candidates[doc_id]
 
         # En az 1 keyword eşleşmesi olmalı
         if c['match_count'] < 1:
             c['final_score'] = 0.0
-        else:
-            c['final_score'] = (
-                c['bm25_score'] * 0.35 +
-                c['semantic_score'] * 0.35 +
-                c['keyword_boost'] * 0.30
-            )
+            continue
 
-    # 6. Sırala ve filtrele (0 skorları çıkar)
+        # 🆕 Öncelik skorunu normalize et (3-10 arası → 0-1 arası)
+        priority_raw = c.get('priority_raw', 5)
+        priority_normalized = (priority_raw - 3) / 7.0  # 3→0, 10→1
+        priority_normalized = max(0, min(1, priority_normalized))  # Clamp [0,1]
+
+        # 🆕 YENİ SCORING FORMÜLİ: BM25 + Semantic + Keyword + Priority
+        c['final_score'] = (
+                c['bm25_score'] * 0.25 +           # BM25 ağırlığı
+                c['semantic_score'] * 0.25 +       # Semantic ağırlığı
+                c['keyword_boost'] * 0.30 +        # Keyword boost
+                priority_normalized * 0.20         # 🆕 Metadata öncelik!
+        )
+
+        # Debug için öncelik göster
+        if priority_raw >= 9:
+            print(f"  🔥 Yüksek öncelik: {c['doc']['belge'][:50]} (öncelik: {priority_raw})")
+
+        # 🆕 RELEVANCE FILTERING - Çok düşük skorları kes
+        if c['final_score'] < 3.5:  # Threshold düşürüldü
+            c['final_score'] = 0.0
+
+    # 7. Sırala ve filtrele
     sorted_results = sorted(
         [c for c in candidates.values() if c['final_score'] > 0],
         key=lambda x: x['final_score'],
@@ -240,6 +336,7 @@ def hybrid_search(query: str, top_k: int = 5) -> List[Dict]:
     )
 
     return sorted_results[:top_k]
+
 
 def create_llm_answer(results: List[Dict], query: str, temperature: float = 0.3) -> str:
     """
@@ -284,7 +381,6 @@ KULLANICI SORUSU:
 CEVAP:"""
 
     try:
-        # YENİ SDK ile çağrı
         response = client.models.generate_content(
             model=MODEL_NAME,
             contents=prompt,
@@ -311,6 +407,7 @@ CEVAP:"""
         print(f"❌ LLM hatası: {e}")
         return create_fallback_answer(results, query)
 
+
 def create_fallback_answer(results: List[Dict], query: str) -> str:
     """Fallback: LLM olmadan cevap"""
     if not results:
@@ -332,6 +429,7 @@ def create_fallback_answer(results: List[Dict], query: str) -> str:
 
     return answer
 
+
 # ============================================================================
 # API ENDPOINTS
 # ============================================================================
@@ -343,8 +441,9 @@ def read_root():
         "status": "online",
         "toplam_madde": len(all_documents),
         "llm_aktif": gemini_available,
-        "model": "BERTurk + Gemini 2.5 Flash"
+        "model": "BERTurk + Gemini 2.5 Flash + Metadata Priority v4.0"  # 🆕 Versiyon güncellemesi
     }
+
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(q: Question):
@@ -370,7 +469,12 @@ def chat(q: Question):
     print(f"📚 {len(results)} alakalı sonuç bulundu:")
     for i, r in enumerate(results[:5], 1):
         doc = r['doc']
-        print(f"   {i}. {doc['belge'][:60]}... - Madde {doc['madde_no']} (skor: {r['final_score']:.2f}, eşleşme: {r['match_count']:.1f})")
+        # 🆕 Öncelik skorunu da göster
+        priority = r.get('priority_raw', 'N/A')
+        print(
+            f"   {i}. {doc['belge'][:60]}... - Madde {doc['madde_no']} "
+            f"(skor: {r['final_score']:.2f}, öncelik: {priority}, eşleşme: {r['match_count']:.1f})"
+        )
 
     # Kaynakları hazırla
     sources = []
@@ -386,7 +490,8 @@ def chat(q: Question):
             "fikra_no": doc.get('fikra_no'),
             "kaynak_metni": kaynak_metni,
             "icerik": doc['icerik'][:400] + "..." if len(doc['icerik']) > 400 else doc['icerik'],
-            "score": round(r['final_score'], 2)
+            "score": round(r['final_score'], 2),
+            "priority": r.get('priority_raw', 5)  # 🆕 Kaynakta öncelik göster
         })
 
     # LLM ile cevap
@@ -402,6 +507,7 @@ def chat(q: Question):
         session_id=q.session_id
     )
 
+
 @app.get("/health")
 def health_check():
     return {
@@ -409,6 +515,8 @@ def health_check():
         "documents": len(all_documents),
         "llm_available": gemini_available
     }
+
+
 @app.delete("/session/{session_id}")
 def delete_session(session_id: str):
     """
@@ -416,6 +524,7 @@ def delete_session(session_id: str):
     """
     print(f"🗑️  Session silindi: {session_id}")
     return {"message": "Session silindi", "session_id": session_id}
+
 
 # ============================================================================
 # ÇALIŞTIRMA
@@ -425,12 +534,12 @@ if __name__ == "__main__":
     import uvicorn
 
     print("\n" + "=" * 70)
-    print("🚀 Selçuk Üniversitesi Mevzuat Chatbot API v2.0")
+    print("🚀 Selçuk Üniversitesi Mevzuat Chatbot API v4.0")
     print("=" * 70)
     print(f"📚 Toplam Madde: {len(all_documents)}")
     print(f"🤖 Embedding: BERTurk")
     print(f"🧠 LLM: {'Gemini 2.5 Flash ✅' if gemini_available else 'Yok ❌'}")
-    print(f"🔍 Search: Hybrid + Smart Keyword Filtering")
+    print(f"🔍 Search: Hybrid + Query Normalization + Metadata Priority")
     print("=" * 70)
     print("\n📡 API: http://localhost:8000")
     print("📖 Docs: http://localhost:8000/docs\n")

@@ -52,20 +52,79 @@ def pdf_to_text(pdf_path):
 
 
 def split_into_maddeler(text, belge_adi):
-    """Metni maddelere ayır"""
+    """Metni maddelere ayır - Çoklu format desteği"""
+
+    # 1️⃣ ÖNCE STANDART "MADDE" FORMATI DENE
     madde_pattern = r'(?:^|\n)\s*MADDE\s*[-–:.]?\s*(\d+)\s*[-–:.]?'
     matches = list(re.finditer(madde_pattern, text, re.IGNORECASE | re.MULTILINE))
 
-    if not matches:
-        print(f"   ⚠️ Madde yok, tüm içerik tek parça")
-        return [{
-            "belge": belge_adi,
-            "madde_no": "0",
-            "fikra_no": None,
-            "icerik": text.strip()
-        }]
+    if matches:
+        print(f"  ✅ MADDE formatı bulundu ({len(matches)} madde)")
+        return _extract_chunks(text, matches, belge_adi, "madde")
 
+    # 2️⃣ SAYILI PARAGRAF FORMATI (1), 2), 3), ...)
+    numbered_pattern = r'(?:^|\n)\s*(\d+)\)\s+'
+    matches = list(re.finditer(numbered_pattern, text, re.MULTILINE))
+
+    # En az 5 tane olmalı (yoksa yanlış eşleşme olabilir)
+    if len(matches) >= 5:
+        print(f"  ✅ Numaralı format bulundu ({len(matches)} madde)")
+        return _extract_chunks(text, matches, belge_adi, "madde")
+
+    # 3️⃣ SORU-CEVAP FORMATI
+    soru_pattern = r'Soru\s+(\d+|G):\s*\n(.*?)\nCevap:\s*\n(.*?)(?=\nSoru|\Z)'
+    matches = list(re.finditer(soru_pattern, text, re.DOTALL))
+
+    if matches:
+        print(f"  ✅ SSS formatı bulundu ({len(matches)} soru)")
+        chunks = []
+        for match in matches:
+            soru_no = match.group(1)
+            soru = match.group(2).strip()
+            cevap = match.group(3).strip()
+
+            chunks.append({
+                "belge": belge_adi,
+                "madde_no": f"S{soru_no}",
+                "fikra_no": None,
+                "icerik": f"SORU: {soru}\n\nCEVAP: {cevap}"
+            })
+        return chunks
+
+    # 4️⃣ HİÇBİRİ BULUNAMADI - TÜM BELGE TEK PARÇA
+    print(f"  ⚠️ Madde yok, tüm içerik tek parça")
+    return [{
+        "belge": belge_adi,
+        "madde_no": "0",
+        "fikra_no": None,
+        "icerik": text.strip()
+    }]
+
+
+def _extract_chunks(text, matches, belge_adi, chunk_type):
+    """Eşleşmelerden chunk'ları çıkar (ortak fonksiyon)"""
     chunks = []
+
+    for i, match in enumerate(matches):
+        madde_no = match.group(1)
+        start_pos = match.start()
+
+        if i + 1 < len(matches):
+            end_pos = matches[i + 1].start()
+        else:
+            end_pos = len(text)
+
+        madde_full = text[start_pos:end_pos].strip()
+
+        if madde_full:
+            chunks.append({
+                "belge": belge_adi,
+                "madde_no": madde_no,
+                "fikra_no": None,
+                "icerik": madde_full
+            })
+
+    return chunks
 
     for i, match in enumerate(matches):
         madde_no = match.group(1)
